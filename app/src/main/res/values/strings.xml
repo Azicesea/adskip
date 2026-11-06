@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">跳过广告</string>
+    <string name="service_label">跳过广告</string>
+    <string name="service_description">自动点击应用启动时的「跳过」按钮，不联网、不收集数据，只在本机运行。</string>
+</resources>

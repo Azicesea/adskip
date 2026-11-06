@@ -1,0 +1,235 @@
+package com.dafeiyu.adskip
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+
+/**
+ * 极简跳广告。
+ *  - 应用切到前台后 20 秒内每 400ms 主动扫一次（不等事件，广告按钮晚渲染也能抓到）；
+ *  - 系统界面（设置、桌面、状态栏等）一律不碰；
+ *  - 单次最多看 500 个节点；
+ *  - 角落点击（无文字的关闭键）默认关闭，需要手动打开「激进模式」。
+ */
+class SkipAccessibilityService : AccessibilityService() {
+
+    private var lastActionAt = 0L
+    private var lastKey = ""
+    private var foregroundPkg = ""
+    private var foregroundAt = 0L
+
+    private val launchWindowMs = 20000L
+    private val pollIntervalMs = 400L
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val poll = object : Runnable {
+        override fun run() {
+            scanOnce()
+            if (SystemClock.uptimeMillis() - foregroundAt < launchWindowMs) {
+                handler.postDelayed(this, pollIntervalMs)
+            }
+        }
+    }
+
+    private val blockedPkgs = setOf(
+        "com.android.settings",
+        "com.android.systemui",
+        "com.android.launcher",
+        "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher",
+        "com.miui.home",
+        "com.huawei.android.launcher",
+        "com.sec.android.app.launcher",
+        "com.android.inputmethod.latin",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller",
+        "com.miui.securitycenter",
+        "com.android.providers.downloads.ui"
+    )
+
+    private val skipWords = listOf("跳过广告", "跳过", "关闭广告", "skipads", "skipad", "skip")
+
+    private fun looksLikeSkip(raw: String): Boolean {
+        val k = raw.lowercase()
+        // 文件名、聊天里的文字容易带「跳过」，一律不当按钮
+        if (k.contains(".apk") || k.contains(".mp4") || k.contains(".zip") ||
+            k.contains(".jpg") || k.contains(".png") || k.contains(".pdf")
+        ) return false
+
+        var t = k.replace(" ", "").replace("\u3000", "")
+        if (t.length > 8) return false
+        t = t.removePrefix("剩余").removePrefix("剩余时间")
+        t = t.trim { it.isDigit() || it == '秒' || it == 's' }
+
+        if (t.isEmpty() || t.length > 6) return false
+        return skipWords.any { t == it } || (t.length <= 6 && skipWords.any { it.startsWith(t) || t.startsWith(it) })
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val e = event ?: return
+        if (!Prefs.enabled(this)) return
+
+        val pkg = e.packageName?.toString() ?: return
+        if (pkg == packageName || pkg in blockedPkgs) return
+        if (!Prefs.isAllowed(this, pkg)) return
+
+        val now = SystemClock.uptimeMillis()
+        if (pkg != foregroundPkg) {
+            foregroundPkg = pkg
+            foregroundAt = now
+            lastKey = ""
+            restartPoll()
+        } else if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            restartPoll()
+        }
+    }
+
+    private fun restartPoll() {
+        handler.removeCallbacks(poll)
+        handler.post(poll)
+    }
+
+    override fun onInterrupt() = Unit
+
+    override fun onDestroy() {
+        handler.removeCallbacks(poll)
+        super.onDestroy()
+    }
+
+    private fun scanOnce() {
+        if (!Prefs.enabled(this)) return
+        val pkg = foregroundPkg
+        if (pkg.isEmpty() || pkg in blockedPkgs) return
+        if (!Prefs.isAllowed(this, pkg)) return
+
+        val now = SystemClock.uptimeMillis()
+        if (now - foregroundAt > launchWindowMs) return
+        if (now - lastActionAt < 1200) return
+
+        val root = rootInActiveWindow ?: return
+        if (root.packageName?.toString() != pkg) return
+
+        val target = findByText(root) ?: if (Prefs.aggressive(this)) findByCorner(root) else null
+        if (target != null) tryClick(target, pkg)
+    }
+
+    private fun findByText(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < 500) {
+            val node = queue.removeFirst()
+            scanned++
+
+            val text = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty())
+                .trim().lowercase()
+            if (text.isNotEmpty() && looksLikeSkip(text)) {
+                clickableSelfOrAncestor(node)?.let { if (isSmallTarget(it)) return it }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return null
+    }
+
+    /** 跳过按钮一般很小；整块卡片、列表项这类大控件不当按钮，避免误点。 */
+    private fun isSmallTarget(node: AccessibilityNodeInfo): Boolean {
+        val dm = resources.displayMetrics
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.width() <= 0 || rect.height() <= 0) return false
+        if (rect.width() > dm.widthPixels * 0.55f) return false
+        if (rect.height() > dm.heightPixels * 0.12f) return false
+        return true
+    }
+
+    private fun clickableSelfOrAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (cur != null && depth < 5) {
+            if (cur.isClickable && cur.isVisibleToUser) return cur
+            cur = cur.parent
+            depth++
+        }
+        return null
+    }
+
+    private fun findByCorner(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val dm = resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+        val rightStart = (w * 0.72f).toInt()
+        val topEnd = (h * 0.32f).toInt()
+        val bottomStart = (h * 0.66f).toInt()
+        val rect = Rect()
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = Int.MAX_VALUE
+
+        while (queue.isNotEmpty() && scanned < 500) {
+            val node = queue.removeFirst()
+            scanned++
+
+            if (node.isClickable && node.isVisibleToUser) {
+                node.getBoundsInScreen(rect)
+                val inCorner = rect.left >= rightStart &&
+                    (rect.bottom <= topEnd || rect.top >= bottomStart)
+                val area = rect.width().toLong() * rect.height().toLong()
+                val smallEnough = area in 1..(w.toLong() * h.toLong() / 4)
+                val noRealText = node.text.isNullOrBlank() && node.contentDescription.isNullOrBlank()
+                if (inCorner && smallEnough && noRealText && area < bestArea) {
+                    best = node
+                    bestArea = area.toInt()
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return best
+    }
+
+    private fun tryClick(node: AccessibilityNodeInfo, pkg: String): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastActionAt < 1200) return false
+
+        val key = pkg + "|" + node.viewIdResourceName + "|" + node.text + "|" + node.contentDescription
+        // 同一个按钮在一次启动窗口里只点一次，点不掉也不再反复戳
+        if (key == lastKey) return false
+
+        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (!clicked) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                val path = Path().apply { moveTo(rect.exactCenterX(), rect.exactCenterY()) }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+                    .build()
+                dispatchGesture(gesture, null, null)
+            }
+        }
+
+        lastActionAt = now
+        lastKey = key
+        if (clicked) {
+            Prefs.bumpCount(this)
+            Prefs.recordAction(this, pkg)
+        }
+        return clicked
+    }
+}
