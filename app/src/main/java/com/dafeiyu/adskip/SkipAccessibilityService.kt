@@ -126,9 +126,11 @@ class SkipAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         if (root.packageName?.toString() != pkg) return
 
-        // 弹窗兜底：这种弹窗常常没有关闭键，只能按返回顶掉；聊天/支付应用一律不动
+        // 弹窗兜底：先找 × 之类的关闭键，实在没有才按返回；聊天/支付应用一律不动
         if (Prefs.popupGuard(this) && pkg !in popupBlockedPkgs && now - lastBackAt > 5000) {
             if (looksLikeNoClosePopup(root)) {
+                val close = findPopupClose(root)
+                if (close != null && tryClick(close, pkg)) return
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 lastBackAt = now
                 Prefs.bumpCount(this)
@@ -142,6 +144,55 @@ class SkipAccessibilityService : AccessibilityService() {
 
         val target = findByText(root) ?: if (Prefs.aggressive(this)) findByCorner(root) else null
         if (target != null) tryClick(target, pkg)
+    }
+
+    /**
+     * 在弹窗里找「关闭」类控件：文字是 ×/✕/关闭/close 的优先，其次小面积无文字可点控件。
+     * 中间那个「開」是大圆按钮，靠尺寸自然被排除。
+     */
+    private fun findPopupClose(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val dm = resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+        val maxW = (w * 0.12f).toInt()
+        val maxH = (h * 0.08f).toInt()
+        val rect = Rect()
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        var strong: AccessibilityNodeInfo? = null
+        var weak: AccessibilityNodeInfo? = null
+        var weakScore = Int.MAX_VALUE
+
+        while (queue.isNotEmpty() && scanned < 500) {
+            val node = queue.removeFirst()
+            scanned++
+
+            val label = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty())
+                .replace(" ", "").lowercase()
+            val isCloseLabel = label == "×" || label == "✕" || label == "x" ||
+                label == "关闭" || label == "close" || label == "跳过" || label == "关闭广告"
+
+            if (node.isClickable && node.isVisibleToUser) {
+                node.getBoundsInScreen(rect)
+                val area = rect.width().toLong() * rect.height().toLong()
+                val small = area in 1..(w.toLong() * h.toLong() / 40)   // < 屏 2.5%
+                val fitsButton = rect.width() <= maxW && rect.height() <= maxH
+                if (isCloseLabel) {
+                    strong = node
+                } else if (small && fitsButton && label.isEmpty() && weak == null) {
+                    // 距右上角越近越像关闭键
+                    val score = (w - rect.right) + rect.top
+                    if (score < weakScore) { weakScore = score; weak = node }
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return strong ?: weak
     }
 
     /**

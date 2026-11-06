@@ -9,11 +9,14 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -86,7 +89,12 @@ class MainActivity : AppCompatActivity() {
         rangeText.text = if (allowed.isEmpty()) {
             "生效范围：全部应用"
         } else {
-            "生效范围：已选 ${allowed.size} 个应用"
+            val pm = packageManager
+            val names = allowed.take(6).mapNotNull { pkg ->
+                runCatching { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() }.getOrNull()
+            }
+            val more = if (allowed.size > names.size) " 等 ${allowed.size} 个" else ""
+            "已选 ${allowed.size} 个：${names.joinToString("、")}$more"
         }
 
         val recent = Prefs.recent(this)
@@ -99,32 +107,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun showAppPicker() {
         val pm = packageManager
-        val apps = pm.getInstalledApplications(0)
+        val all = pm.getInstalledApplications(0)
             .asSequence()
             .filter { it.packageName != packageName }
             .map { AppEntry(it.packageName, pm.getApplicationLabel(it).toString()) }
             .sortedBy { it.label.lowercase() }
             .toList()
 
-        if (apps.isEmpty()) {
+        if (all.isEmpty()) {
             Toast.makeText(this, "读不到应用列表", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val chosen = Prefs.allowList(this)
-        val checked = BooleanArray(apps.size) { apps[it].pkg in chosen }
+        val chosen = Prefs.allowList(this).toMutableSet()
+        var shown: List<AppEntry> = all
 
         val adapter = object : BaseAdapter() {
-            override fun getCount() = apps.size
-            override fun getItem(position: Int): Any = apps[position]
+            override fun getCount() = shown.size
+            override fun getItem(position: Int): Any = shown[position]
             override fun getItemId(position: Int) = position.toLong()
 
             override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
                 val view = convertView ?: layoutInflater.inflate(R.layout.item_app, parent, false)
-                val app = apps[position]
+                val app = shown[position]
                 view.findViewById<TextView>(R.id.appName).text = app.label
                 view.findViewById<TextView>(R.id.appPkg).text = app.pkg
-                view.findViewById<CheckBox>(R.id.appCheck).isChecked = checked[position]
+                view.findViewById<CheckBox>(R.id.appCheck).isChecked = app.pkg in chosen
                 view.findViewById<ImageView>(R.id.appIcon).setImageDrawable(
                     runCatching { pm.getApplicationIcon(app.pkg) }.getOrNull()
                 )
@@ -132,34 +140,64 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val search = EditText(this).apply {
+            hint = "搜索应用名或包名"
+            setSingleLine()
+            setPadding(40, 20, 40, 20)
+        }
+
         val listView = ListView(this)
         listView.adapter = adapter
-        val height = (resources.displayMetrics.heightPixels * 0.6).toInt()
-        listView.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
+        listView.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            (resources.displayMetrics.heightPixels * 0.52).toInt()
+        )
         listView.setOnItemClickListener { _, _, position, _ ->
-            checked[position] = !checked[position]
+            val pkg = shown[position].pkg
+            if (!chosen.add(pkg)) chosen.remove(pkg)
             adapter.notifyDataSetChanged()
         }
 
-        MaterialAlertDialogBuilder(this)
+        search.doAfterTextChanged { text ->
+            val q = text?.toString()?.trim()?.lowercase().orEmpty()
+            shown = if (q.isEmpty()) all else all.filter {
+                it.label.lowercase().contains(q) || it.pkg.lowercase().contains(q)
+            }
+            adapter.notifyDataSetChanged()
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(search)
+            addView(listView)
+        }
+
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle("选择应用（不选 = 全部生效）")
-            .setView(listView)
-            .setPositiveButton("保存") { _, _ ->
-                val picked = apps.filterIndexed { i, _ -> checked[i] }.map { it.pkg }.toSet()
-                Prefs.setAllowList(this, picked)
+            .setView(container)
+            .setPositiveButton("保存", null)
+            .setNegativeButton("取消", null)
+            .setNeutralButton("全清", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                Prefs.setAllowList(this, chosen)
                 refresh()
                 Toast.makeText(
                     this,
-                    if (picked.isEmpty()) "全部应用生效" else "已选 ${picked.size} 个应用",
+                    if (chosen.isEmpty()) "全部应用生效" else "已选 ${chosen.size} 个应用",
                     Toast.LENGTH_SHORT
                 ).show()
+                dialog.dismiss()
             }
-            .setNegativeButton("取消", null)
-            .setNeutralButton("全清") { _, _ ->
-                Prefs.setAllowList(this, emptySet())
-                refresh()
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                chosen.clear()
+                adapter.notifyDataSetChanged()
+                Toast.makeText(this, "已全部取消，点保存生效", Toast.LENGTH_SHORT).show()
             }
-            .show()
+        }
+        dialog.show()
     }
 
     private fun isServiceEnabled(): Boolean {
