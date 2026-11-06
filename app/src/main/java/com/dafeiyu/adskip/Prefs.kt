@@ -13,6 +13,7 @@ object Prefs {
     private const val KEY_ALLOW = "allow_list"
     private const val KEY_AGGRESSIVE = "aggressive"
     private const val KEY_RECENT = "recent_actions"
+    private const val KEY_POPUP_GUARD = "popup_guard"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -51,6 +52,13 @@ object Prefs {
 
     fun setAggressive(ctx: Context, value: Boolean) {
         sp(ctx).edit().putBoolean(KEY_AGGRESSIVE, value).apply()
+    }
+
+    /** 弹窗兜底：认出「红包已到账 + ¥数字 + 開」这类没关闭键的弹窗时按返回。默认开。 */
+    fun popupGuard(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_POPUP_GUARD, true)
+
+    fun setPopupGuard(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean(KEY_POPUP_GUARD, value).apply()
     }
 
     /** 最近点掉过的应用，最多 8 条，格式「HH:mm:ss 包名」。 */

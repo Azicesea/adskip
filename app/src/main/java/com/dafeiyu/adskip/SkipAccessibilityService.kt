@@ -26,16 +26,28 @@ class SkipAccessibilityService : AccessibilityService() {
 
     private val launchWindowMs = 20000L
     private val pollIntervalMs = 400L
+    private val idleIntervalMs = 1500L
+    private var lastBackAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private val poll = object : Runnable {
         override fun run() {
-            scanOnce()
-            if (SystemClock.uptimeMillis() - foregroundAt < launchWindowMs) {
-                handler.postDelayed(this, pollIntervalMs)
-            }
+            val now = SystemClock.uptimeMillis()
+            val inLaunch = now - foregroundAt < launchWindowMs
+            scanOnce(inLaunch)
+            handler.postDelayed(this, if (inLaunch) pollIntervalMs else idleIntervalMs)
         }
     }
+
+    /** 聊天、支付类应用永远不按返回，防止把正常消息顶掉。 */
+    private val popupBlockedPkgs = setOf(
+        "com.tencent.mm",
+        "com.tencent.mobileqq",
+        "com.tencent.tim",
+        "com.eg.android.AlipayGphone",
+        "com.alibaba.android.rimet",
+        "com.tencent.wework"
+    )
 
     private val blockedPkgs = setOf(
         "com.android.settings",
@@ -104,21 +116,61 @@ class SkipAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    private fun scanOnce() {
+    private fun scanOnce(inLaunch: Boolean) {
         if (!Prefs.enabled(this)) return
         val pkg = foregroundPkg
         if (pkg.isEmpty() || pkg in blockedPkgs) return
         if (!Prefs.isAllowed(this, pkg)) return
 
         val now = SystemClock.uptimeMillis()
-        if (now - foregroundAt > launchWindowMs) return
-        if (now - lastActionAt < 1200) return
-
         val root = rootInActiveWindow ?: return
         if (root.packageName?.toString() != pkg) return
 
+        // 弹窗兜底：这种弹窗常常没有关闭键，只能按返回顶掉；聊天/支付应用一律不动
+        if (Prefs.popupGuard(this) && pkg !in popupBlockedPkgs && now - lastBackAt > 5000) {
+            if (looksLikeNoClosePopup(root)) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                lastBackAt = now
+                Prefs.bumpCount(this)
+                Prefs.recordAction(this, pkg)
+                return
+            }
+        }
+
+        if (!inLaunch) return
+        if (now - lastActionAt < 1200) return
+
         val target = findByText(root) ?: if (Prefs.aggressive(this)) findByCorner(root) else null
         if (target != null) tryClick(target, pkg)
+    }
+
+    /**
+     * 认出「红包已到账 / ¥10 起 / 開 按钮」这种全屏弹窗。
+     * 三个特征同时出现才算，避免把正常页面顶掉。
+     */
+    private fun looksLikeNoClosePopup(root: AccessibilityNodeInfo): Boolean {
+        var hasOpen = false
+        var hasMoney = false
+        var hasRed = false
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < 400) {
+            val node = queue.removeFirst()
+            scanned++
+            val raw = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty()).trim()
+            if (raw.isNotEmpty()) {
+                val t = raw.replace(" ", "").replace("\u3000", "")
+                if (t == "開" || t == "开") hasOpen = true
+                if (t.contains("¥") || t.contains("￥")) hasMoney = true
+                if (t.contains("红包") || t.contains("到账")) hasRed = true
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return hasOpen && hasMoney && hasRed
     }
 
     private fun findByText(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {

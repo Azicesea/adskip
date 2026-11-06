@@ -28,6 +28,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rangeText: TextView
     private lateinit var switchEnabled: MaterialSwitch
     private lateinit var switchAggressive: MaterialSwitch
+    private lateinit var switchPopupGuard: MaterialSwitch
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,12 +40,16 @@ class MainActivity : AppCompatActivity() {
         rangeText = findViewById(R.id.rangeText)
         switchEnabled = findViewById(R.id.switchEnabled)
         switchAggressive = findViewById(R.id.switchAggressive)
+        switchPopupGuard = findViewById(R.id.switchPopupGuard)
 
         switchEnabled.isChecked = Prefs.enabled(this)
         switchEnabled.setOnCheckedChangeListener { _, checked -> Prefs.setEnabled(this, checked) }
 
         switchAggressive.isChecked = Prefs.aggressive(this)
         switchAggressive.setOnCheckedChangeListener { _, checked -> Prefs.setAggressive(this, checked) }
+
+        switchPopupGuard.isChecked = Prefs.popupGuard(this)
+        switchPopupGuard.setOnCheckedChangeListener { _, checked -> Prefs.setPopupGuard(this, checked) }
 
         findViewById<MaterialButton>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))

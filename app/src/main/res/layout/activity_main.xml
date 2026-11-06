@@ -63,6 +63,12 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="激进模式（角落无文字关闭键）" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchPopupGuard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="弹窗兜底（无关闭键时按返回）" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
