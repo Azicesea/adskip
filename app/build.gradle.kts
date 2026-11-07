@@ -11,8 +11,8 @@ android {
         applicationId = "com.dafeiyu.adskip"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 17
+        versionName = "2.6"
     }
 
     buildTypes {

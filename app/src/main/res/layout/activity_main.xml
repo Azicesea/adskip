@@ -69,6 +69,18 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="弹窗兜底（无关闭键时按返回）" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchBlind"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="盲点兜底（直接点右上/右下角）" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchDiag"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="记录页面结构（排查用）" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -116,6 +128,13 @@
                     android:text="最近动作：无"
                     android:textSize="11sp"
                     android:alpha="0.65" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDiag"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="导出诊断" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

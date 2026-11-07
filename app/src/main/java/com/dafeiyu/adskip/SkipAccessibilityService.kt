@@ -9,6 +9,10 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 极简跳广告。
@@ -28,6 +32,12 @@ class SkipAccessibilityService : AccessibilityService() {
     private val pollIntervalMs = 400L
     private val idleIntervalMs = 1500L
     private var lastBackAt = 0L
+    private var blindTapFor = 0L
+    private var blindStep = 0
+    private var diagFor = 0L
+    private var diagCount = 0
+    private var actionCount = 0
+    private var lastPollAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private val poll = object : Runnable {
@@ -35,7 +45,8 @@ class SkipAccessibilityService : AccessibilityService() {
             val now = SystemClock.uptimeMillis()
             val inLaunch = now - foregroundAt < launchWindowMs
             scanOnce(inLaunch)
-            handler.postDelayed(this, if (inLaunch) pollIntervalMs else idleIntervalMs)
+            // 开屏窗口过了就停轮询，省电；有新事件（切应用、弹窗）会自动重新拉起来
+            if (inLaunch) handler.postDelayed(this, pollIntervalMs)
         }
     }
 
@@ -76,18 +87,20 @@ class SkipAccessibilityService : AccessibilityService() {
             k.contains(".jpg") || k.contains(".png") || k.contains(".pdf")
         ) return false
 
-        var t = k.replace(" ", "").replace("\u3000", "")
+        // 去掉所有空白（含不换行空格），再剥掉倒计时数字
+        var t = k.replace(Regex("[\\s\\u00a0\\u3000]+"), "")
         if (t.length > 8) return false
-        t = t.removePrefix("剩余").removePrefix("剩余时间")
-        t = t.trim { it.isDigit() || it == '秒' || it == 's' }
+        t = t.replace("剩余时间", "").replace("剩余", "")
+        t = t.trim { it.isDigit() || it == '秒' || it == 's' || it == '|' || it == '·' }
 
         if (t.isEmpty() || t.length > 6) return false
-        return skipWords.any { t == it } || (t.length <= 6 && skipWords.any { it.startsWith(t) || t.startsWith(it) })
+        return t.startsWith("跳过") || t.startsWith("关闭广告") ||
+            t == "skip" || t.startsWith("skip")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
-        if (!Prefs.enabled(this)) return
+        if (!Prefs.enabled(this) && !Prefs.diag(this)) return
 
         val pkg = e.packageName?.toString() ?: return
         if (pkg == packageName || pkg in blockedPkgs) return
@@ -98,13 +111,19 @@ class SkipAccessibilityService : AccessibilityService() {
             foregroundPkg = pkg
             foregroundAt = now
             lastKey = ""
+            actionCount = 0
             restartPoll()
-        } else if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        } else {
+            // 任何页面变化都把扫描拉起来一次，弹窗兜底靠这个触发
             restartPoll()
         }
     }
 
     private fun restartPoll() {
+        // 页面事件很密，节流一下，别每个事件都扫一遍
+        val now = SystemClock.uptimeMillis()
+        if (now - lastPollAt < 400) return
+        lastPollAt = now
         handler.removeCallbacks(poll)
         handler.post(poll)
     }
@@ -117,7 +136,9 @@ class SkipAccessibilityService : AccessibilityService() {
     }
 
     private fun scanOnce(inLaunch: Boolean) {
-        if (!Prefs.enabled(this)) return
+        val active = Prefs.enabled(this)
+        // 关掉自动跳过时仍允许记录页面结构，方便排查
+        if (!active && !Prefs.diag(this)) return
         val pkg = foregroundPkg
         if (pkg.isEmpty() || pkg in blockedPkgs) return
         if (!Prefs.isAllowed(this, pkg)) return
@@ -127,7 +148,7 @@ class SkipAccessibilityService : AccessibilityService() {
         if (root.packageName?.toString() != pkg) return
 
         // 弹窗兜底：先找 × 之类的关闭键，实在没有才按返回；聊天/支付应用一律不动
-        if (Prefs.popupGuard(this) && pkg !in popupBlockedPkgs && now - lastBackAt > 5000) {
+        if (active && Prefs.popupGuard(this) && pkg !in popupBlockedPkgs && now - lastBackAt > 5000) {
             if (looksLikeNoClosePopup(root)) {
                 val close = findPopupClose(root)
                 if (close != null && tryClick(close, pkg)) return
@@ -140,10 +161,144 @@ class SkipAccessibilityService : AccessibilityService() {
         }
 
         if (!inLaunch) return
+        // 一轮最多动三次手，多了一下就乱点了
+        if (actionCount >= 3) return
+
+        // 诊断：每次切前台抓 3 张开屏期间的节点快照（刚进应用时往往还在闪屏）
+        if (Prefs.diag(this)) {
+            if (diagFor != foregroundAt) {
+                diagFor = foregroundAt
+                diagCount = 0
+            }
+            val due = when (diagCount) {
+                0 -> true
+                1 -> now - foregroundAt > 1200
+                2 -> now - foregroundAt > 2500
+                3 -> now - foregroundAt > 4000
+                4 -> now - foregroundAt > 6000
+                else -> false
+            }
+            if (due) {
+                diagCount++
+                runCatching { dumpTree(root, pkg, diagCount) }
+            }
+        }
+
+        // 自动跳过没开时，上面只记录、不动手
+        if (!active) return
         if (now - lastActionAt < 1200) return
 
         val target = findByText(root) ?: if (Prefs.aggressive(this)) findByCorner(root) else null
-        if (target != null) tryClick(target, pkg)
+        if (target != null) {
+            if (tryClick(target, pkg) && countNodes(root, 120) > 80) {
+                // 点完之后页面节点数暴涨，说明已经进首页了，这一轮别再动手
+                actionCount = 3
+            }
+            return
+        }
+        // 盲点兜底：按钮是图片、无障碍树里压根没有时，只能按坐标点。
+        // 只在「页面几乎没节点」时动手——开屏广告基本就是一张图，正常首页节点很多，免得瞎点。
+        if (Prefs.blindTap(this) && now - foregroundAt > 1500 && looksLikeFullScreenImage(root)) {
+            if (blindTapFor != foregroundAt) {
+                blindTapFor = foregroundAt
+                blindStep = 0
+            }
+            when {
+                blindStep == 0 -> { blindStep = 1; blindTap(pkg, 0.885f, 0.105f) }
+                blindStep == 1 && now - foregroundAt > 2600 -> {
+                    blindStep = 2
+                    blindTap(pkg, 0.885f, 0.945f)
+                    actionCount++
+                }
+            }
+        }
+    }
+
+    /** 数一下窗口里的节点数，超过 cap 就提前返回 cap（省时间）。 */
+    private fun countNodes(root: AccessibilityNodeInfo, cap: Int): Int {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var n = 0
+        while (queue.isNotEmpty() && n < cap) {
+            val node = queue.removeFirst()
+            n++
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return n
+    }
+
+    /** 开屏广告基本是一整张图，无障碍树里节点很少；正常首页、聊天页节点很多。 */
+    private fun looksLikeFullScreenImage(root: AccessibilityNodeInfo): Boolean {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var n = 0
+        while (queue.isNotEmpty() && n < 60) {
+            val node = queue.removeFirst()
+            n++
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return n < 40
+    }
+
+    /** 把当前窗口的节点结构写成文本，排查用。 */
+    private fun dumpTree(root: AccessibilityNodeInfo, pkg: String, seq: Int) {
+        val dm = resources.displayMetrics
+        val sb = StringBuilder()
+        sb.append("pkg=").append(pkg).append(" screen=")
+            .append(dm.widthPixels).append("x").append(dm.heightPixels).append('\n')
+
+        val rect = Rect()
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.add(root to 0)
+        var n = 0
+        while (queue.isNotEmpty() && n < 400) {
+            val (node, depth) = queue.removeFirst()
+            n++
+            node.getBoundsInScreen(rect)
+            repeat(minOf(depth, 14)) { sb.append("  ") }
+            sb.append('[').append(node.className?.toString()?.substringAfterLast('.') ?: "?").append(']')
+            val id = node.viewIdResourceName
+            if (!id.isNullOrEmpty()) sb.append(" id=").append(id.substringAfterLast('/'))
+            val t = node.text?.toString().orEmpty()
+            if (t.isNotEmpty()) sb.append(" text=").append(t)
+            val d = node.contentDescription?.toString().orEmpty()
+            if (d.isNotEmpty()) sb.append(" desc=").append(d)
+            if (node.isClickable) sb.append(" click")
+            sb.append(" b=").append(rect.left).append(',').append(rect.top)
+                .append(',').append(rect.right).append(',').append(rect.bottom)
+            sb.append('\n')
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it to depth + 1) }
+            }
+        }
+
+        val dir = getExternalFilesDir(null) ?: filesDir
+        dir.mkdirs()
+        val ts = SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        File(dir, "diag-$pkg-$ts-$seq.txt").writeText(sb.toString())
+        dir.listFiles { f -> f.name.startsWith("diag-") }
+            ?.sortedByDescending { it.lastModified() }
+            ?.drop(9)
+            ?.forEach { it.delete() }
+    }
+
+    /** 右上/右下「跳过」的常见位置，按屏幕比例算，不依赖任何节点。 */
+    private fun blindTap(pkg: String, fx: Float, fy: Float) {
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels * fx
+        val y = dm.heightPixels * fy
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .build()
+        dispatchGesture(gesture, null, null)
+        lastActionAt = SystemClock.uptimeMillis()
+        Prefs.bumpCount(this)
+        Prefs.recordAction(this, pkg)
     }
 
     /**
@@ -210,6 +365,8 @@ class SkipAccessibilityService : AccessibilityService() {
         while (queue.isNotEmpty() && scanned < 400) {
             val node = queue.removeFirst()
             scanned++
+            // 直播、正常页面节点成百上千；这种「全屏弹窗」基本就几个节点，多的一律不算
+            if (scanned > 120) return false
             val raw = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty()).trim()
             if (raw.isNotEmpty()) {
                 val t = raw.replace(" ", "").replace("\u3000", "")
@@ -235,7 +392,10 @@ class SkipAccessibilityService : AccessibilityService() {
             val text = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty())
                 .trim().lowercase()
             if (text.isNotEmpty() && looksLikeSkip(text)) {
-                clickableSelfOrAncestor(node)?.let { if (isSmallTarget(it)) return it }
+                val clickable = clickableSelfOrAncestor(node)
+                if (clickable != null && isSmallTarget(clickable)) return clickable
+                // 文字节点自己很小、但外层是整张 WebView 的情况：直接点文字所在位置
+                if (isSmallTarget(node)) return node
             }
 
             for (i in 0 until node.childCount) {
@@ -286,16 +446,20 @@ class SkipAccessibilityService : AccessibilityService() {
             val node = queue.removeFirst()
             scanned++
 
-            if (node.isClickable && node.isVisibleToUser) {
-                node.getBoundsInScreen(rect)
-                val inCorner = rect.left >= rightStart &&
-                    (rect.bottom <= topEnd || rect.top >= bottomStart)
-                val area = rect.width().toLong() * rect.height().toLong()
-                val smallEnough = area in 1..(w.toLong() * h.toLong() / 4)
-                val noRealText = node.text.isNullOrBlank() && node.contentDescription.isNullOrBlank()
-                if (inCorner && smallEnough && noRealText && area < bestArea) {
-                    best = node
-                    bestArea = area.toInt()
+            if (node.isVisibleToUser) {
+                // 有些广告的关闭键本身不可点，可点的是外面一层同样大小的壳
+                val target = if (node.isClickable) node else clickableSelfOrAncestor(node)
+                if (target != null) {
+                    target.getBoundsInScreen(rect)
+                    val inCorner = rect.left >= rightStart &&
+                        (rect.bottom <= topEnd || rect.top >= bottomStart)
+                    val area = rect.width().toLong() * rect.height().toLong()
+                    val smallEnough = area in 1..(w.toLong() * h.toLong() / 4)
+                    val noRealText = target.text.isNullOrBlank() && target.contentDescription.isNullOrBlank()
+                    if (inCorner && smallEnough && noRealText && area < bestArea) {
+                        best = target
+                        bestArea = area.toInt()
+                    }
                 }
             }
 
@@ -311,8 +475,8 @@ class SkipAccessibilityService : AccessibilityService() {
         if (now - lastActionAt < 1200) return false
 
         val key = pkg + "|" + node.viewIdResourceName + "|" + node.text + "|" + node.contentDescription
-        // 同一个按钮在一次启动窗口里只点一次，点不掉也不再反复戳
-        if (key == lastKey) return false
+        // 同一个按钮隔 2.5 秒可以再点一次（倒计时的「跳过 5」点一次没反应）
+        if (key == lastKey && now - lastActionAt < 2500) return false
 
         val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         if (!clicked) {
@@ -330,6 +494,7 @@ class SkipAccessibilityService : AccessibilityService() {
         lastActionAt = now
         lastKey = key
         if (clicked) {
+            actionCount++
             Prefs.bumpCount(this)
             Prefs.recordAction(this, pkg)
         }

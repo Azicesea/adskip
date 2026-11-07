@@ -16,6 +16,7 @@ import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -32,6 +33,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchEnabled: MaterialSwitch
     private lateinit var switchAggressive: MaterialSwitch
     private lateinit var switchPopupGuard: MaterialSwitch
+    private lateinit var switchBlind: MaterialSwitch
+    private lateinit var switchDiag: MaterialSwitch
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,6 +47,8 @@ class MainActivity : AppCompatActivity() {
         switchEnabled = findViewById(R.id.switchEnabled)
         switchAggressive = findViewById(R.id.switchAggressive)
         switchPopupGuard = findViewById(R.id.switchPopupGuard)
+        switchBlind = findViewById(R.id.switchBlind)
+        switchDiag = findViewById(R.id.switchDiag)
 
         switchEnabled.isChecked = Prefs.enabled(this)
         switchEnabled.setOnCheckedChangeListener { _, checked -> Prefs.setEnabled(this, checked) }
@@ -53,6 +58,14 @@ class MainActivity : AppCompatActivity() {
 
         switchPopupGuard.isChecked = Prefs.popupGuard(this)
         switchPopupGuard.setOnCheckedChangeListener { _, checked -> Prefs.setPopupGuard(this, checked) }
+
+        switchBlind.isChecked = Prefs.blindTap(this)
+        switchBlind.setOnCheckedChangeListener { _, checked -> Prefs.setBlindTap(this, checked) }
+
+        switchDiag.isChecked = Prefs.diag(this)
+        switchDiag.setOnCheckedChangeListener { _, checked -> Prefs.setDiag(this, checked) }
+
+        findViewById<MaterialButton>(R.id.btnDiag).setOnClickListener { shareDiag() }
 
         findViewById<MaterialButton>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -103,6 +116,36 @@ class MainActivity : AppCompatActivity() {
         } else {
             "最近动作：\n" + recent.take(4).joinToString("\n")
         }
+    }
+
+    /** 把最近三次诊断文件一起分享出去（微信/QQ/邮箱都行）。 */
+    private fun shareDiag() {
+        val dir = getExternalFilesDir(null)
+        val files = dir?.listFiles { f -> f.name.startsWith("diag-") }
+            ?.sortedByDescending { it.lastModified() }
+            ?.take(3)
+            ?.sortedBy { it.lastModified() }
+            .orEmpty()
+        if (files.isEmpty()) {
+            Toast.makeText(this, "还没有诊断记录，先打开「记录页面结构」再用几次应用", Toast.LENGTH_LONG).show()
+            return
+        }
+        val uris = ArrayList(files.map { FileProvider.getUriForFile(this, "$packageName.files", it) })
+        Toast.makeText(this, "共 ${files.size} 份，最新：${files.last().name}", Toast.LENGTH_LONG).show()
+        val intent = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uris[0])
+            }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "text/plain"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            }
+        }
+        intent.putExtra(Intent.EXTRA_SUBJECT, files.last().name)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(intent, "发送诊断文件"))
     }
 
     private fun showAppPicker() {

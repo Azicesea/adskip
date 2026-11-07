@@ -14,6 +14,8 @@ object Prefs {
     private const val KEY_AGGRESSIVE = "aggressive"
     private const val KEY_RECENT = "recent_actions"
     private const val KEY_POPUP_GUARD = "popup_guard"
+    private const val KEY_BLIND = "blind_tap"
+    private const val KEY_DIAG = "diag"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -59,6 +61,20 @@ object Prefs {
 
     fun setPopupGuard(ctx: Context, value: Boolean) {
         sp(ctx).edit().putBoolean(KEY_POPUP_GUARD, value).apply()
+    }
+
+    /** 盲点：开屏 4 秒还没跳掉，就按固定坐标点右上角那块（有些广告的「跳过」是图，无障碍拿不到）。默认关。 */
+    fun blindTap(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_BLIND, false)
+
+    fun setBlindTap(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean(KEY_BLIND, value).apply()
+    }
+
+    /** 诊断：每次应用切前台把当时的节点结构存一份，排查「为什么这个广告跳不掉」。默认关。 */
+    fun diag(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_DIAG, false)
+
+    fun setDiag(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean(KEY_DIAG, value).apply()
     }
 
     /** 最近点掉过的应用，最多 8 条，格式「HH:mm:ss 包名」。 */
