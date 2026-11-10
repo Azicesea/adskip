@@ -16,6 +16,7 @@ object Prefs {
     private const val KEY_POPUP_GUARD = "popup_guard"
     private const val KEY_BLIND = "blind_tap"
     private const val KEY_DIAG = "diag"
+    private const val KEY_AUTO_CHECK_UPDATES = "auto_check_updates"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -75,6 +76,12 @@ object Prefs {
 
     fun setDiag(ctx: Context, value: Boolean) {
         sp(ctx).edit().putBoolean(KEY_DIAG, value).apply()
+    }
+
+    fun autoCheckUpdates(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_AUTO_CHECK_UPDATES, false)
+
+    fun setAutoCheckUpdates(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean(KEY_AUTO_CHECK_UPDATES, value).apply()
     }
 
     /** 最近点掉过的应用，最多 8 条，格式「HH:mm:ss 包名」。 */

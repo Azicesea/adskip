@@ -1,7 +1,9 @@
 package com.dafeiyu.adskip
 
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
@@ -18,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.core.widget.doAfterTextChanged
+import androidx.lifecycle.ViewModelProvider
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -80,11 +83,110 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnPickApps).setOnClickListener {
             showAppPicker()
         }
+
+        setupUpdates()
     }
 
     override fun onResume() {
         super.onResume()
         refresh()
+    }
+
+    private fun setupUpdates() {
+        val updates = ViewModelProvider(this)[UpdateViewModel::class.java]
+        val installedVersion = packageManager.getPackageInfo(packageName, 0).versionName
+        findViewById<TextView>(R.id.updateVersion).text =
+            getString(R.string.update_installed_version, installedVersion)
+
+        findViewById<MaterialSwitch>(R.id.switchAutoCheckUpdates).apply {
+            isChecked = Prefs.autoCheckUpdates(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                Prefs.setAutoCheckUpdates(this@MainActivity, checked)
+                if (checked) updates.check()
+            }
+        }
+
+        val status = findViewById<TextView>(R.id.updateStatus)
+        val checkButton = findViewById<MaterialButton>(R.id.btnCheckUpdates)
+        val updateButton = findViewById<MaterialButton>(R.id.btnUpdateAction)
+        checkButton.setOnClickListener { updates.check() }
+        updateButton.setOnClickListener {
+            when (val state = updates.state.value) {
+                is UpdateViewModel.State.Available -> showRelease(state.release) { updates.download() }
+                is UpdateViewModel.State.Ready -> installUpdate(state.apk, updates::downloadMissing)
+                else -> Unit
+            }
+        }
+
+        updates.state.observe(this) { state ->
+            checkButton.isEnabled = (state as? UpdateViewModel.State.Message)?.busy != true
+            updateButton.visibility = View.VISIBLE
+            status.text = when (state) {
+                is UpdateViewModel.State.Message -> {
+                    updateButton.visibility = View.GONE
+                    getString(state.text)
+                }
+                is UpdateViewModel.State.Available -> {
+                    updateButton.setText(R.string.update_view_release)
+                    val message = getString(R.string.update_available, state.release.tag)
+                    if (updates.announce(state.release.versionCode)) {
+                        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                    }
+                    state.error?.let { "$message\n${getString(it)}" } ?: message
+                }
+                is UpdateViewModel.State.Ready -> {
+                    updateButton.setText(R.string.update_install)
+                    val message = getString(R.string.update_downloaded, state.apk.versionName)
+                    state.error?.let { "$message\n${getString(it)}" } ?: message
+                }
+            }
+        }
+    }
+
+    private fun showRelease(release: GitHubUpdates.Release, download: () -> Unit) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.update_available, release.tag))
+            .setMessage(release.notes.ifBlank { getString(R.string.update_no_notes) })
+            .setPositiveButton(R.string.update_download) { _, _ -> download() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installUpdate(apk: GitHubUpdates.Downloaded, onMissing: () -> Unit) {
+        if (!apk.file.isFile) {
+            onMissing()
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            MaterialAlertDialogBuilder(this)
+                .setMessage(R.string.update_install_permission)
+                .setPositiveButton(R.string.update_open_settings) { _, _ ->
+                    launchUpdateIntent(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.fromParts("package", packageName, null)
+                        )
+                    )
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", apk.file)
+        launchUpdateIntent(Intent(Intent.ACTION_INSTALL_PACKAGE, uri).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        })
+    }
+
+    private fun launchUpdateIntent(intent: Intent) {
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.update_install_unavailable, Toast.LENGTH_LONG).show()
+        } catch (_: SecurityException) {
+            Toast.makeText(this, R.string.update_install_unavailable, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun refresh() {

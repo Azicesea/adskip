@@ -72,11 +72,12 @@ class SkipAccessibilityService : AccessibilityService() {
         "com.android.inputmethod.latin",
         "com.android.permissioncontroller",
         "com.google.android.permissioncontroller",
-        "com.android.packageinstaller",
-        "com.google.android.packageinstaller",
         "com.miui.securitycenter",
         "com.android.providers.downloads.ui"
     )
+
+    private fun isBlocked(pkg: String): Boolean =
+        pkg == packageName || pkg in blockedPkgs || pkg.endsWith(".packageinstaller")
 
     private val skipWords = listOf("跳过广告", "跳过", "关闭广告", "skipads", "skipad", "skip")
 
@@ -103,7 +104,7 @@ class SkipAccessibilityService : AccessibilityService() {
         if (!Prefs.enabled(this) && !Prefs.diag(this)) return
 
         val pkg = e.packageName?.toString() ?: return
-        if (pkg == packageName || pkg in blockedPkgs) return
+        if (isBlocked(pkg)) return
         if (!Prefs.isAllowed(this, pkg)) return
 
         val now = SystemClock.uptimeMillis()
@@ -140,7 +141,7 @@ class SkipAccessibilityService : AccessibilityService() {
         // 关掉自动跳过时仍允许记录页面结构，方便排查
         if (!active && !Prefs.diag(this)) return
         val pkg = foregroundPkg
-        if (pkg.isEmpty() || pkg in blockedPkgs) return
+        if (pkg.isEmpty() || isBlocked(pkg)) return
         if (!Prefs.isAllowed(this, pkg)) return
 
         val now = SystemClock.uptimeMillis()
